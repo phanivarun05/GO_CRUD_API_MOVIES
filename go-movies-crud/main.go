@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-
-	"github.com/gorilla/mux"
+	"sync"
+	"time"
 )
 
 type Movie struct {
@@ -24,73 +24,148 @@ type Director struct {
 	Lastname  string `json:"lastname"`
 }
 
-var movies []Movie
-
-func getMovies(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(movies)
+type MovieStore struct {
+	mu     sync.RWMutex
+	movies []Movie
 }
 
-func getMovie(w http.ResponseWriter, r *http.Request) {
+func NewMovieStore() *MovieStore {
+	return &MovieStore{
+		movies: []Movie{
+			{
+				ID:    "1",
+				Isbn:  "345643",
+				Title: "Toxic - A Fairy Tail For Grown-Ups",
+				Director: &Director{
+					Firstname: "Geetu Mohan",
+					Lastname:  "Das",
+				},
+			},
+			{
+				ID:    "2",
+				Isbn:  "452119",
+				Title: "The Paradise",
+				Director: &Director{
+					Firstname: "Srikanth",
+					Lastname:  "Odela",
+				},
+			},
+		},
+	}
+}
+
+func responsdJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
-	params := mux.Vars(r)
-	for _, movie := range movies {
-		if movie.ID == params["id"] {
-			json.NewEncoder(w).Encode(movie)
-			return
+	w.WriteHeader(status)
+	if data != nil {
+		if err := json.NewEncoder(w).Encode(data); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	}
 }
 
-func updateMovie(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	params := mux.Vars(r)
-	for index, movie := range movies {
-		if movie.ID == params["id"] {
-			movies = slices.Delete(movies, index, index+1)
-			var movie Movie
-			_ = json.NewDecoder(r.Body).Decode(&movie)
-			movie.ID = params["id"]
-			movies = append(movies, movie)
-			json.NewEncoder(w).Encode(movie)
+func respondError(w http.ResponseWriter, status int, message string) {
+	responsdJSON(w, status, map[string]string{"error": message})
+}
+
+func (s *MovieStore) getMovies(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	responsdJSON(w, http.StatusOK, s.movies)
+}
+
+func (s *MovieStore) getMovie(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, movie := range s.movies {
+		if movie.ID == id {
+			responsdJSON(w, http.StatusOK, movie)
 			return
 		}
 	}
+	respondError(w, http.StatusNotFound, "Movie not Found")
 }
 
-func createMovie(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("content-Type", "application/json")
+func (s *MovieStore) updateMovie(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var updatedMovie Movie
+	if err := json.NewDecoder(r.Body).Decode(&updatedMovie); err != nil {
+		respondError(w, http.StatusBadGateway, "Inavalid JSON payload")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for index, movie := range s.movies {
+		if movie.ID == id {
+			updatedMovie.ID = id
+			s.movies[index] = updatedMovie
+			responsdJSON(w, http.StatusOK, updatedMovie)
+			return
+		}
+	}
+	respondError(w, http.StatusNotFound, "Movie Not Found")
+}
+
+func (s *MovieStore) createMovie(w http.ResponseWriter, r *http.Request) {
 	var movie Movie
-	_ = json.NewDecoder(r.Body).Decode(&movie)
-	movie.ID = strconv.Itoa(rand.IntN(10000))
-	movies = append(movies, movie)
-	json.NewEncoder(w).Encode(movie)
+	if err := json.NewDecoder(r.Body).Decode(&movie); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	movie.ID = strconv.Itoa(rand.IntN(100))
+	s.movies = append(s.movies, movie)
+
+	responsdJSON(w, http.StatusCreated, movie)
 }
 
-func deleteMovie(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	params := mux.Vars(r)
+func (s *MovieStore) deleteMovie(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
 
-	for index, movie := range movies {
-		if movie.ID == params["id"] {
-			movies = slices.Delete(movies, index, index+1)
-			break
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for index, movie := range s.movies {
+		if movie.ID == id {
+			s.movies = slices.Delete(s.movies, index, index+1)
+			w.WriteHeader(http.StatusNoContent)
+			return
 		}
 	}
-	json.NewEncoder(w).Encode(movies)
+	respondError(w, http.StatusNotFound, "Movie not Found")
 }
 
 func main() {
-	r := mux.NewRouter()
+	store := NewMovieStore()
 
-	movies = append(movies, Movie{ID: "1", Isbn: "345643", Title: "Toxic - A Fairy Tail For Grown-Ups", Director: &Director{Firstname: "Geetu Mohan", Lastname: "Das"}})
-	movies = append(movies, Movie{ID: "2", Isbn: "452119", Title: "The Paradise", Director: &Director{Firstname: "Srikanth", Lastname: "Odela"}})
-	r.HandleFunc("/movies", getMovies).Methods("GET")
-	r.HandleFunc("/movies/{id}", getMovie).Methods("GET")
-	r.HandleFunc("/movies", createMovie).Methods("POST")
-	r.HandleFunc("/movies/{id}", updateMovie).Methods("PUT")
-	r.HandleFunc("/movies/{id}", deleteMovie).Methods("DELETE")
+	mux := http.NewServeMux()
 
-	fmt.Printf("Starting server at Port 8000\n")
-	log.Fatal(http.ListenAndServe(":8000", r))
+	mux.HandleFunc("GET /movies", store.getMovies)
+	mux.HandleFunc("GET /movies/{id}", store.getMovie)
+	mux.HandleFunc("POST /movies", store.createMovie)
+	mux.HandleFunc("PUT /movies/{id}", store.updateMovie)
+	mux.HandleFunc("DELETE /movies/{id}", store.deleteMovie)
+
+	server := &http.Server{
+		Addr:         ":8000",
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	fmt.Println("Server Starting at PORT 8000")
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Server error: %v", err)
+	}
 }
