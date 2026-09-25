@@ -43,7 +43,19 @@ func getMovie(w http.ResponseWriter, r *http.Request) {
 }
 
 func updateMovie(w http.ResponseWriter, r *http.Request) {
-
+	w.Header().Set("Content-Type", "application/json")
+	params := mux.Vars(r)
+	for index, movie := range movies {
+		if movie.ID == params["id"] {
+			movies = slices.Delete(movies, index, index+1)
+			var movie Movie
+			_ = json.NewDecoder(r.Body).Decode(&movie)
+			movie.ID = params["id"]
+			movies = append(movies, movie)
+			json.NewEncoder(w).Encode(movie)
+			return
+		}
+	}
 }
 
 func createMovie(w http.ResponseWriter, r *http.Request) {
